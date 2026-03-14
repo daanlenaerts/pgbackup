@@ -40,10 +40,15 @@ def parse_ssh_config() -> SshConfig | None:
     pkey = None
     ssh_key = os.environ.get("SSH_KEY", "").strip()
     if ssh_key:
-        # Restore newlines that may have been flattened to spaces
-        ssh_key = ssh_key.replace(" ", "\n")
-        for marker in ("BEGIN", "END"):
-            ssh_key = ssh_key.replace(f"-----{marker}\n", f"-----{marker} ")
+        # Strip marker lines, convert spaces to newlines, re-add markers.
+        import re
+        begin = re.search(r"-----BEGIN [^-]+-----", ssh_key)
+        end = re.search(r"-----END [^-]+-----", ssh_key)
+        if not begin or not end:
+            log.error("SSH_KEY missing BEGIN/END markers")
+            sys.exit(1)
+        body = ssh_key[begin.end():end.start()].strip().replace(" ", "\n")
+        ssh_key = f"{begin.group()}\n{body}\n{end.group()}\n"
 
         key_classes = [paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey]
         for cls in key_classes:
