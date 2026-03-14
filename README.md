@@ -35,7 +35,7 @@ docker run -d \
 Backups are stored as `pg_dump` custom format (`.dump`) files named `{dbname}_{timestamp}.dump`. Restore with:
 
 ```bash
-pg_restore -d <target_db> <file>.dump
+pg_restore -d "postgresql://user:pass@host:5432/dbname" <file>.dump
 ```
 
 ## Encryption
@@ -47,11 +47,11 @@ To decrypt and restore a backup:
 ```bash
 # Using a key file:
 age -d -i key.txt backup.dump.age > backup.dump
-pg_restore -d <target_db> backup.dump
+pg_restore -d "postgresql://user:pass@host:5432/dbname" backup.dump
 
 # Or provide the key directly (without it appearing in shell history):
 read -srp "Age secret key: " AGE_KEY && age -d -i <(echo "$AGE_KEY") backup.dump.age > backup.dump && unset AGE_KEY
-pg_restore -d <target_db> backup.dump
+pg_restore -d "postgresql://user:pass@host:5432/dbname" backup.dump
 ```
 
 Generate a key pair with `age-keygen`:
