@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["croniter", "httpx", "sshtunnel"]
-# ///
 """PostgreSQL backup utility for Docker."""
 
 import logging
