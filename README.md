@@ -24,6 +24,7 @@ docker run -d \
 | `WEBHOOK_URL` | No | — | URL to POST failure notifications (Slack/Discord/ntfy) |
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token from @BotFather |
 | `TELEGRAM_CHAT_IDS` | No | — | Comma-separated Telegram chat IDs to notify |
+| `PG_DUMP_TIMEOUT` | No | `3600` | pg_dump timeout in seconds |
 | `RUN_ON_STARTUP` | No | `false` | Run backup immediately before entering cron loop |
 | `SSH_HOST` | No | — | SSH tunnel jump host in `user@host[:port]` format |
 | `SSH_KEY` | No | — | PEM private key content (falls back to SSH agent if unset) |
