@@ -42,6 +42,25 @@ pg_restore -d <target_db> <file>.dump
 
 **Telegram**: Sends Markdown-formatted messages to one or more chats when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_IDS` are set.
 
+## PostgreSQL Backup User
+
+Create a read-only role dedicated to backups:
+
+```sql
+CREATE ROLE pgbackup WITH LOGIN PASSWORD 'a-strong-password';
+GRANT CONNECT ON DATABASE mydb TO pgbackup;
+-- connect to mydb, then:
+GRANT USAGE ON SCHEMA public TO pgbackup;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO pgbackup;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO pgbackup;
+```
+
+Then use it in the connection string:
+
+```
+PG_CONNECTIONS="postgresql://pgbackup:a-strong-password@host:5432/mydb"
+```
+
 ## SSH Tunnels
 
 To back up a database behind an SSH bastion/jump host, set `SSH_HOST`:
@@ -56,3 +75,45 @@ docker run -d \
 ```
 
 The tunnel forwards a random local port to the database host:port extracted from each connection URI. Without `SSH_HOST`, behavior is unchanged. If `SSH_KEY` is omitted, the SSH agent or default keys are used.
+
+### Setting Up a Limited SSH User
+
+On the bastion/jump host (Ubuntu), create a dedicated user that can only forward TCP connections and nothing else:
+
+```bash
+# Create a user with no password and no home directory shell access
+sudo adduser --disabled-password --gecos "pgbackup tunnel" pgbackup
+
+# Generate a key pair on the machine running the container
+ssh-keygen -t ed25519 -f pgbackup_key -N "" -C "pgbackup"
+
+# Copy the public key to the bastion host
+sudo mkdir -p /home/pgbackup/.ssh
+sudo cp pgbackup_key.pub /home/pgbackup/.ssh/authorized_keys
+sudo chown -R pgbackup:pgbackup /home/pgbackup/.ssh
+sudo chmod 700 /home/pgbackup/.ssh
+sudo chmod 600 /home/pgbackup/.ssh/authorized_keys
+```
+
+Lock the user down to port-forwarding only by setting its shell to `nologin` and restricting the authorized key:
+
+```bash
+# Disable interactive shell
+sudo usermod -s /usr/sbin/nologin pgbackup
+
+# Prefix the key in authorized_keys to allow only tunnel forwarding:
+# no-pty,no-X11-forwarding,no-agent-forwarding,command="/bin/false" ssh-ed25519 AAAA... pgbackup
+sudo sed -i 's|^ssh-|no-pty,no-X11-forwarding,no-agent-forwarding,command="/bin/false" ssh-|' \
+  /home/pgbackup/.ssh/authorized_keys
+```
+
+Then pass the private key to the container:
+
+```bash
+docker run -d \
+  -e PG_CONNECTIONS="postgresql://user:pass@db-host:5432/mydb" \
+  -e SSH_HOST="pgbackup@bastion.example.com" \
+  -e SSH_KEY="$(cat pgbackup_key)" \
+  -v pgbackups:/backups \
+  pgbackup
+```
