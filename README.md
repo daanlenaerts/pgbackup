@@ -25,6 +25,8 @@ docker run -d \
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token from @BotFather |
 | `TELEGRAM_CHAT_IDS` | No | — | Comma-separated Telegram chat IDs to notify |
 | `RUN_ON_STARTUP` | No | `false` | Run backup immediately before entering cron loop |
+| `SSH_HOST` | No | — | SSH tunnel jump host in `user@host[:port]` format |
+| `SSH_KEY` | No | — | PEM private key content (falls back to SSH agent if unset) |
 
 ## Backups
 
@@ -39,3 +41,18 @@ pg_restore -d <target_db> <file>.dump
 **Webhook**: Posts `{"text": "..."}` on failure — compatible with Slack, Discord, and ntfy.
 
 **Telegram**: Sends Markdown-formatted messages to one or more chats when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_IDS` are set.
+
+## SSH Tunnels
+
+To back up a database behind an SSH bastion/jump host, set `SSH_HOST`:
+
+```bash
+docker run -d \
+  -e PG_CONNECTIONS="postgresql://user:pass@db-host:5432/mydb" \
+  -e SSH_HOST="ubuntu@bastion.example.com" \
+  -e SSH_KEY="$(cat ~/.ssh/id_ed25519)" \
+  -v pgbackups:/backups \
+  pgbackup
+```
+
+The tunnel forwards a random local port to the database host:port extracted from each connection URI. Without `SSH_HOST`, behavior is unchanged. If `SSH_KEY` is omitted, the SSH agent or default keys are used.

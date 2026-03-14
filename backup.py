@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["croniter", "httpx"]
+# dependencies = ["croniter", "httpx", "sshtunnel"]
 # ///
 """PostgreSQL backup utility for Docker."""
 
@@ -19,6 +19,7 @@ from croniter import croniter
 
 import httpx
 
+import ssh
 import telegram
 
 logging.basicConfig(
@@ -51,6 +52,7 @@ class Config:
     telegram_token: str | None
     telegram_chat_ids: list[str]
     run_on_startup: bool
+    ssh: ssh.SshConfig | None
     timestamp_fmt: str = field(default="%Y%m%d_%H%M%S", init=False)
 
 
@@ -77,6 +79,7 @@ def parse_config() -> Config:
             if c.strip()
         ],
         run_on_startup=os.environ.get("RUN_ON_STARTUP", "false").lower() in ("true", "1", "yes"),
+        ssh=ssh.parse_ssh_config(),
     )
 
 
@@ -97,7 +100,7 @@ class BackupResult:
     error: str | None = None
 
 
-def backup_database(uri: str, backup_dir: Path, timestamp: str) -> BackupResult:
+def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.SshConfig | None = None) -> BackupResult:
     dbname, hostname = extract_db_info(uri)
     label = f"{dbname}@{hostname}"
     filename = f"{dbname}_{timestamp}.dump"
@@ -106,14 +109,15 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str) -> BackupResult:
 
     log.info("Backing up %s", label)
     try:
-        with tmp.open("wb") as f:
-            proc = subprocess.run(
-                ["pg_dump", "-Fc", uri],
-                stdout=f,
-                stderr=subprocess.PIPE,
-                env={**os.environ, "PGCONNECT_TIMEOUT": "30"},
-                timeout=3600,
-            )
+        with ssh.ssh_tunnel_for_uri(uri, ssh_config) as tunneled_uri:
+            with tmp.open("wb") as f:
+                proc = subprocess.run(
+                    ["pg_dump", "-Fc", tunneled_uri],
+                    stdout=f,
+                    stderr=subprocess.PIPE,
+                    env={**os.environ, "PGCONNECT_TIMEOUT": "30"},
+                    timeout=3600,
+                )
         if proc.returncode != 0:
             stderr = proc.stderr.decode(errors="replace").strip()
             log.error("pg_dump failed for %s: %s", label, stderr)
@@ -167,7 +171,7 @@ def run_backup_cycle(config: Config) -> None:
     timestamp = datetime.now().strftime(config.timestamp_fmt)
     config.backup_dir.mkdir(parents=True, exist_ok=True)
 
-    results = [backup_database(uri, config.backup_dir, timestamp) for uri in config.connections]
+    results = [backup_database(uri, config.backup_dir, timestamp, config.ssh) for uri in config.connections]
 
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
