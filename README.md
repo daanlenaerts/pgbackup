@@ -45,7 +45,12 @@ Backups can be encrypted at rest using [Age](https://age-encryption.org/). Set `
 To decrypt and restore a backup:
 
 ```bash
+# Using a key file:
 age -d -i key.txt backup.dump.age > backup.dump
+pg_restore -d <target_db> backup.dump
+
+# Or provide the key directly (without it appearing in shell history):
+read -srp "Age secret key: " AGE_KEY && age -d -i <(echo "$AGE_KEY") backup.dump.age > backup.dump && unset AGE_KEY
 pg_restore -d <target_db> backup.dump
 ```
 
