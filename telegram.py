@@ -16,7 +16,7 @@ def send(token: str, chat_ids: list[str], message: str) -> None:
         try:
             resp = httpx.post(
                 url,
-                json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+                json={"chat_id": chat_id, "text": message},
                 timeout=15,
             )
             resp.raise_for_status()

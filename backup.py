@@ -51,6 +51,9 @@ class Config:
     run_on_startup: bool
     ssh: ssh.SshConfig | None
     pg_dump_timeout: int
+    stall_timeout: int
+    lock_wait_timeout: int
+    retries: int
     age_public_key: str | None
     timestamp_fmt: str = field(default="%Y%m%d_%H%M%S", init=False)
 
@@ -79,7 +82,10 @@ def parse_config() -> Config:
         ],
         run_on_startup=os.environ.get("RUN_ON_STARTUP", "false").lower() in ("true", "1", "yes"),
         ssh=ssh.parse_ssh_config(),
-        pg_dump_timeout=int(os.environ.get("PG_DUMP_TIMEOUT", "3600")),
+        pg_dump_timeout=int(os.environ.get("PG_DUMP_TIMEOUT", "21600")),
+        stall_timeout=int(os.environ.get("STALL_TIMEOUT", "3600")),
+        lock_wait_timeout=int(os.environ.get("LOCK_WAIT_TIMEOUT", "300")),
+        retries=int(os.environ.get("PG_DUMP_RETRIES", "3")),
         age_public_key=os.environ.get("AGE_PUBLIC_KEY") or None,
     )
 
@@ -103,7 +109,6 @@ def _add_keepalive_params(uri: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
 
-STALL_TIMEOUT = 300  # seconds with no output growth before declaring stall
 POLL_INTERVAL = 10
 PROGRESS_INTERVAL = 60
 
@@ -141,6 +146,7 @@ def _monitor_procs(
     tmp: Path,
     label: str,
     timeout: int,
+    stall_timeout: int,
 ) -> _StallInfo | None:
     """Poll until target process exits. Returns stall info or None on success."""
     last_size = 0
@@ -164,7 +170,7 @@ def _monitor_procs(
         if size > last_size:
             last_size = size
             last_growth = now
-        elif now - last_growth > STALL_TIMEOUT and last_size > 0:
+        elif stall_timeout and now - last_growth > stall_timeout and last_size > 0:
             return _StallInfo("stall", last_size)
 
         if now - last_log >= PROGRESS_INTERVAL:
@@ -216,7 +222,7 @@ def _read_stderr(source: subprocess.Popen | tempfile.SpooledTemporaryFile | obje
         return ""
 
 
-def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.SshConfig | None = None, pg_dump_timeout: int = 3600, age_public_key: str | None = None) -> BackupResult:
+def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.SshConfig | None = None, pg_dump_timeout: int = 21600, stall_timeout: int = 3600, lock_wait_timeout: int = 300, age_public_key: str | None = None) -> BackupResult:
     dbname, hostname = extract_db_info(uri)
     label = f"{dbname}@{hostname}"
     suffix = ".dump.age" if age_public_key else ".dump"
@@ -231,13 +237,18 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
             dump_env = {
                 **os.environ,
                 "PGCONNECT_TIMEOUT": "30",
-                "PGOPTIONS": "-c statement_timeout=0 -c idle_in_transaction_session_timeout=0",
+                "PGOPTIONS": "-c statement_timeout=0 -c idle_in_transaction_session_timeout=0 -c transaction_timeout=0",
             }
+            pg_dump_cmd = [
+                "pg_dump", "-Fc",
+                f"--lock-wait-timeout={lock_wait_timeout * 1000}",
+                dump_uri,
+            ]
 
             if age_public_key:
                 with tmp.open("wb") as f, tempfile.TemporaryFile() as pg_stderr_file:
                     pg_dump = subprocess.Popen(
-                        ["pg_dump", "-Fc", dump_uri],
+                        pg_dump_cmd,
                         stdout=subprocess.PIPE,
                         stderr=pg_stderr_file,
                         env=dump_env,
@@ -250,7 +261,7 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
                     )
                     pg_dump.stdout.close()
 
-                    stall = _monitor_procs(age_proc, tmp, label, pg_dump_timeout)
+                    stall = _monitor_procs(age_proc, tmp, label, pg_dump_timeout, stall_timeout)
                     if stall:
                         pg_dump_state = _proc_status(pg_dump)
                         age_state = _proc_status(age_proc)
@@ -263,7 +274,7 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
                         if stall.reason == "timeout":
                             msg = f"timed out after {pg_dump_timeout}s at {size_str}"
                         else:
-                            msg = f"stalled at {size_str} — no data written for {STALL_TIMEOUT}s"
+                            msg = f"stalled at {size_str} — no data written for {stall_timeout}s"
                         msg += f" | pg_dump: {pg_dump_state}"
                         if pg_stderr:
                             msg += f" ({pg_stderr})"
@@ -292,13 +303,13 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
             else:
                 with tmp.open("wb") as f:
                     proc = subprocess.Popen(
-                        ["pg_dump", "-Fc", dump_uri],
+                        pg_dump_cmd,
                         stdout=f,
                         stderr=subprocess.PIPE,
                         env=dump_env,
                     )
 
-                    stall = _monitor_procs(proc, tmp, label, pg_dump_timeout)
+                    stall = _monitor_procs(proc, tmp, label, pg_dump_timeout, stall_timeout)
                     if stall:
                         pg_dump_state = _proc_status(proc)
                         stderr = _read_stderr(proc)
@@ -309,7 +320,7 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
                         if stall.reason == "timeout":
                             msg = f"timed out after {pg_dump_timeout}s at {size_str}"
                         else:
-                            msg = f"stalled at {size_str} — no data written for {STALL_TIMEOUT}s"
+                            msg = f"stalled at {size_str} — no data written for {stall_timeout}s"
                         msg += f" | pg_dump: {pg_dump_state}"
                         if stderr:
                             msg += f" ({stderr})"
@@ -365,7 +376,17 @@ def run_backup_cycle(config: Config) -> None:
     timestamp = datetime.now().strftime(config.timestamp_fmt)
     config.backup_dir.mkdir(parents=True, exist_ok=True)
 
-    results = [backup_database(uri, config.backup_dir, timestamp, config.ssh, config.pg_dump_timeout, config.age_public_key) for uri in config.connections]
+    results = []
+    for uri in config.connections:
+        result = backup_database(uri, config.backup_dir, timestamp, config.ssh, config.pg_dump_timeout, config.stall_timeout, config.lock_wait_timeout, config.age_public_key)
+        for attempt in range(1, config.retries + 1):
+            if result.success or shutdown_requested:
+                break
+            delay = min(30 * (2 ** attempt), 600)
+            log.warning("Retry %d/%d for %s@%s in %ds", attempt, config.retries, result.dbname, result.hostname, delay)
+            time.sleep(delay)
+            result = backup_database(uri, config.backup_dir, timestamp, config.ssh, config.pg_dump_timeout, config.stall_timeout, config.lock_wait_timeout, config.age_public_key)
+        results.append(result)
 
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
