@@ -227,6 +227,7 @@ def main() -> None:
         len(config.connections),
         config.cron_expr,
         config.retention_days,
+        "enabled" if config.age_public_key else "disabled",
     )
 
     startup_msg = (
