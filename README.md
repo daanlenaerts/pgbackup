@@ -63,6 +63,12 @@ Only the public key is needed by the container. Keep the private key safe and of
 
 **Telegram**: Sends Markdown-formatted messages to one or more chats when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_IDS` are set.
 
+To get your chat ID, message your bot and then run:
+
+```bash
+curl -s "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates" | jq '.result[].message.chat.id'
+```
+
 ## PostgreSQL Backup User
 
 Create a read-only role dedicated to backups:
