@@ -6,7 +6,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends postgresql-client && \
     rm -rf /var/lib/apt/lists/*
 
-COPY backup.py ssh.py telegram.py pyproject.toml /app/
+COPY backup.py ssh.py telegram.py pyproject.toml uv.lock
 WORKDIR /app
 
 # UV sync
