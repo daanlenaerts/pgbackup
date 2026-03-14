@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from croniter import croniter
 
@@ -91,6 +91,18 @@ def extract_db_info(uri: str) -> tuple[str, str]:
     return dbname, hostname
 
 
+def _add_keepalive_params(uri: str) -> str:
+    """Add TCP keepalive parameters to a PostgreSQL connection URI."""
+    parsed = urlparse(uri)
+    params = parse_qs(parsed.query)
+    params.setdefault("keepalives", ["1"])
+    params.setdefault("keepalives_idle", ["60"])
+    params.setdefault("keepalives_interval", ["10"])
+    params.setdefault("keepalives_count", ["5"])
+    params.setdefault("tcp_user_timeout", ["60000"])
+    return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
+
+
 @dataclass
 class BackupResult:
     uri: str
@@ -112,12 +124,17 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
     log.info("Backing up %s", label)
     try:
         with ssh.ssh_tunnel_for_uri(uri, ssh_config) as tunneled_uri:
-            dump_env = {**os.environ, "PGCONNECT_TIMEOUT": "30"}
+            dump_uri = _add_keepalive_params(tunneled_uri)
+            dump_env = {
+                **os.environ,
+                "PGCONNECT_TIMEOUT": "30",
+                "PGOPTIONS": "-c statement_timeout=0 -c idle_in_transaction_session_timeout=0",
+            }
 
             if age_public_key:
                 with tmp.open("wb") as f, tempfile.TemporaryFile() as pg_stderr_file:
                     pg_dump = subprocess.Popen(
-                        ["pg_dump", "-Fc", tunneled_uri],
+                        ["pg_dump", "-Fc", dump_uri],
                         stdout=subprocess.PIPE,
                         stderr=pg_stderr_file,
                         env=dump_env,
@@ -149,7 +166,7 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
             else:
                 with tmp.open("wb") as f:
                     proc = subprocess.run(
-                        ["pg_dump", "-Fc", tunneled_uri],
+                        ["pg_dump", "-Fc", dump_uri],
                         stdout=f,
                         stderr=subprocess.PIPE,
                         env=dump_env,
