@@ -50,6 +50,7 @@ class Config:
     run_on_startup: bool
     ssh: ssh.SshConfig | None
     pg_dump_timeout: int
+    age_public_key: str | None
     timestamp_fmt: str = field(default="%Y%m%d_%H%M%S", init=False)
 
 
@@ -78,6 +79,7 @@ def parse_config() -> Config:
         run_on_startup=os.environ.get("RUN_ON_STARTUP", "false").lower() in ("true", "1", "yes"),
         ssh=ssh.parse_ssh_config(),
         pg_dump_timeout=int(os.environ.get("PG_DUMP_TIMEOUT", "3600")),
+        age_public_key=os.environ.get("AGE_PUBLIC_KEY") or None,
     )
 
 
@@ -98,33 +100,67 @@ class BackupResult:
     error: str | None = None
 
 
-def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.SshConfig | None = None, pg_dump_timeout: int = 3600) -> BackupResult:
+def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.SshConfig | None = None, pg_dump_timeout: int = 3600, age_public_key: str | None = None) -> BackupResult:
     dbname, hostname = extract_db_info(uri)
     label = f"{dbname}@{hostname}"
-    filename = f"{dbname}_{timestamp}.dump"
+    suffix = ".dump.age" if age_public_key else ".dump"
+    filename = f"{dbname}_{timestamp}{suffix}"
     dest = backup_dir / filename
     tmp = dest.with_suffix(".tmp")
 
     log.info("Backing up %s", label)
     try:
         with ssh.ssh_tunnel_for_uri(uri, ssh_config) as tunneled_uri:
-            with tmp.open("wb") as f:
-                proc = subprocess.run(
-                    ["pg_dump", "-Fc", tunneled_uri],
-                    stdout=f,
-                    stderr=subprocess.PIPE,
-                    env={**os.environ, "PGCONNECT_TIMEOUT": "30"},
-                    timeout=pg_dump_timeout,
-                )
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode(errors="replace").strip()
-            log.error("pg_dump failed for %s: %s", label, stderr)
-            tmp.unlink(missing_ok=True)
-            return BackupResult(uri, dbname, hostname, success=False, error=stderr)
+            dump_env = {**os.environ, "PGCONNECT_TIMEOUT": "30"}
+
+            if age_public_key:
+                with tmp.open("wb") as f:
+                    pg_dump = subprocess.Popen(
+                        ["pg_dump", "-Fc", tunneled_uri],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=dump_env,
+                    )
+                    age_proc = subprocess.Popen(
+                        ["age", "-r", age_public_key],
+                        stdin=pg_dump.stdout,
+                        stdout=f,
+                        stderr=subprocess.PIPE,
+                    )
+                    pg_dump.stdout.close()
+                    age_stderr = age_proc.communicate(timeout=pg_dump_timeout)[1]
+                    pg_dump.wait()
+
+                if pg_dump.returncode != 0:
+                    stderr = pg_dump.stderr.read().decode(errors="replace").strip()
+                    log.error("pg_dump failed for %s: %s", label, stderr)
+                    tmp.unlink(missing_ok=True)
+                    return BackupResult(uri, dbname, hostname, success=False, error=stderr)
+                if age_proc.returncode != 0:
+                    stderr = age_stderr.decode(errors="replace").strip()
+                    log.error("age encryption failed for %s: %s", label, stderr)
+                    tmp.unlink(missing_ok=True)
+                    return BackupResult(uri, dbname, hostname, success=False, error=f"age: {stderr}")
+
+                log.info("Encrypted with age")
+            else:
+                with tmp.open("wb") as f:
+                    proc = subprocess.run(
+                        ["pg_dump", "-Fc", tunneled_uri],
+                        stdout=f,
+                        stderr=subprocess.PIPE,
+                        env=dump_env,
+                        timeout=pg_dump_timeout,
+                    )
+                if proc.returncode != 0:
+                    stderr = proc.stderr.decode(errors="replace").strip()
+                    log.error("pg_dump failed for %s: %s", label, stderr)
+                    tmp.unlink(missing_ok=True)
+                    return BackupResult(uri, dbname, hostname, success=False, error=stderr)
 
         tmp.rename(dest)
         size_mb = dest.stat().st_size / (1024 * 1024)
-        log.info("Backed up %s → %s (%.1f MB)", label, filename, size_mb)
+        log.info("Backed up %s → %s (%.1f MB)", label, dest.name, size_mb)
         return BackupResult(uri, dbname, hostname, success=True, path=dest)
 
     except subprocess.TimeoutExpired:
@@ -141,7 +177,7 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
 def cleanup_old_backups(backup_dir: Path, retention_days: int) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     removed = 0
-    for f in backup_dir.glob("*.dump"):
+    for f in sorted(set(backup_dir.glob("*.dump")) | set(backup_dir.glob("*.dump.age"))):
         if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) < cutoff:
             f.unlink()
             log.info("Removed expired backup: %s", f.name)
@@ -169,7 +205,7 @@ def run_backup_cycle(config: Config) -> None:
     timestamp = datetime.now().strftime(config.timestamp_fmt)
     config.backup_dir.mkdir(parents=True, exist_ok=True)
 
-    results = [backup_database(uri, config.backup_dir, timestamp, config.ssh, config.pg_dump_timeout) for uri in config.connections]
+    results = [backup_database(uri, config.backup_dir, timestamp, config.ssh, config.pg_dump_timeout, config.age_public_key) for uri in config.connections]
 
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]

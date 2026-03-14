@@ -24,6 +24,7 @@ docker run -d \
 | `WEBHOOK_URL` | No | — | URL to POST failure notifications (Slack/Discord/ntfy) |
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token from @BotFather |
 | `TELEGRAM_CHAT_IDS` | No | — | Comma-separated Telegram chat IDs to notify |
+| `AGE_PUBLIC_KEY` | No | — | Age public key for encrypting backups (e.g. `age1...`) |
 | `PG_DUMP_TIMEOUT` | No | `3600` | pg_dump timeout in seconds |
 | `RUN_ON_STARTUP` | No | `false` | Run backup immediately before entering cron loop |
 | `SSH_HOST` | No | — | SSH tunnel jump host in `user@host[:port]` format |
@@ -36,6 +37,25 @@ Backups are stored as `pg_dump` custom format (`.dump`) files named `{dbname}_{t
 ```bash
 pg_restore -d <target_db> <file>.dump
 ```
+
+## Encryption
+
+Backups can be encrypted at rest using [Age](https://age-encryption.org/). Set `AGE_PUBLIC_KEY` to your Age public key and `pg_dump` output is piped directly through `age` — unencrypted data never touches disk. Encrypted backups are stored as `.dump.age` files.
+
+To decrypt and restore a backup:
+
+```bash
+age -d -i key.txt backup.dump.age > backup.dump
+pg_restore -d <target_db> backup.dump
+```
+
+Generate a key pair with `age-keygen`:
+
+```bash
+age-keygen
+```
+
+Only the public key is needed by the container. Keep the private key safe and offline — it is required to decrypt backups.
 
 ## Notifications
 
