@@ -186,12 +186,7 @@ def cleanup_old_backups(backup_dir: Path, retention_days: int) -> None:
         log.info("Cleaned up %d expired backup(s)", removed)
 
 
-def notify_webhook(url: str, failures: list[BackupResult]) -> None:
-    lines = [f"⚠️ **pgbackup**: {len(failures)} backup(s) failed:"]
-    for f in failures:
-        lines.append(f"• `{f.dbname}@{f.hostname}`: {f.error}")
-    text = "\n".join(lines)
-
+def notify_webhook(url: str, text: str) -> None:
     try:
         resp = httpx.post(url, json={"text": text}, timeout=15)
         resp.raise_for_status()
@@ -215,23 +210,34 @@ def run_backup_cycle(config: Config) -> None:
     cleanup_old_backups(config.backup_dir, config.retention_days)
 
     if failures:
+        lines = [f"⚠️ pgbackup: {len(failures)} backup(s) failed:"]
+        for f in failures:
+            lines.append(f"• {f.dbname}@{f.hostname}: {f.error}")
+        failure_msg = "\n".join(lines)
         if config.webhook_url:
-            notify_webhook(config.webhook_url, failures)
+            notify_webhook(config.webhook_url, failure_msg)
         if config.telegram_token and config.telegram_chat_ids:
-            lines = [f"⚠️ *pgbackup*: {len(failures)} backup(s) failed:"]
-            for f in failures:
-                lines.append(f"• `{f.dbname}@{f.hostname}`: {f.error}")
-            telegram.send(config.telegram_token, config.telegram_chat_ids, "\n".join(lines))
+            telegram.send(config.telegram_token, config.telegram_chat_ids, failure_msg)
 
 
 def main() -> None:
     config = parse_config()
     log.info(
-        "pgbackup started — %d database(s), schedule=%s, retention=%dd",
+        "pgbackup started — %d database(s), schedule=%s, retention=%dd, encryption=%s",
         len(config.connections),
         config.cron_expr,
         config.retention_days,
     )
+
+    startup_msg = (
+        f"pgbackup started — {len(config.connections)} database(s), "
+        f"schedule=`{config.cron_expr}`, retention={config.retention_days}d, "
+        f"encryption={'enabled' if config.age_public_key else 'disabled'}"
+    )
+    if config.webhook_url:
+        notify_webhook(config.webhook_url, startup_msg)
+    if config.telegram_token and config.telegram_chat_ids:
+        telegram.send(config.telegram_token, config.telegram_chat_ids, startup_msg)
 
     if config.run_on_startup:
         log.info("Running startup backup cycle")
