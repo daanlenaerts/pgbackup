@@ -106,7 +106,7 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
     suffix = ".dump.age" if age_public_key else ".dump"
     filename = f"{dbname}_{timestamp}{suffix}"
     dest = backup_dir / filename
-    tmp = dest.with_suffix(".tmp")
+    tmp = dest.with_name(dest.name + ".tmp")
 
     log.info("Backing up %s", label)
     try:
