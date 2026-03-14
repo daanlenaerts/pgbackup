@@ -103,6 +103,11 @@ def _add_keepalive_params(uri: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
 
+STALL_TIMEOUT = 300  # seconds with no output growth before declaring stall
+POLL_INTERVAL = 10
+PROGRESS_INTERVAL = 60
+
+
 @dataclass
 class BackupResult:
     uri: str
@@ -111,6 +116,104 @@ class BackupResult:
     success: bool
     path: Path | None = None
     error: str | None = None
+
+
+def _kill_procs(*procs: subprocess.Popen) -> None:
+    """Kill and reap subprocesses."""
+    for p in procs:
+        if p.poll() is None:
+            p.kill()
+    for p in procs:
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+@dataclass
+class _StallInfo:
+    reason: str  # "stall" or "timeout"
+    last_size: int
+
+
+def _monitor_procs(
+    target: subprocess.Popen,
+    tmp: Path,
+    label: str,
+    timeout: int,
+) -> _StallInfo | None:
+    """Poll until target process exits. Returns stall info or None on success."""
+    last_size = 0
+    last_growth = time.monotonic()
+    last_log = 0.0
+    start = time.monotonic()
+
+    while target.poll() is None:
+        time.sleep(POLL_INTERVAL)
+        elapsed = time.monotonic() - start
+
+        if elapsed > timeout:
+            return _StallInfo("timeout", last_size)
+
+        try:
+            size = tmp.stat().st_size
+        except FileNotFoundError:
+            size = 0
+
+        now = time.monotonic()
+        if size > last_size:
+            last_size = size
+            last_growth = now
+        elif now - last_growth > STALL_TIMEOUT and last_size > 0:
+            return _StallInfo("stall", last_size)
+
+        if now - last_log >= PROGRESS_INTERVAL:
+            rate = last_size / elapsed if elapsed > 0 else 0
+            log.info(
+                "%s: %.1f GB written, %.1f MB/s (%dm%02ds elapsed)",
+                label,
+                last_size / (1024 ** 3),
+                rate / (1024 ** 2),
+                int(elapsed) // 60,
+                int(elapsed) % 60,
+            )
+            last_log = now
+
+    return None
+
+
+def _proc_status(proc: subprocess.Popen) -> str:
+    """Describe a process's current state."""
+    rc = proc.poll()
+    if rc is None:
+        return "still running"
+    if rc < 0:
+        try:
+            sig_name = signal.Signals(-rc).name
+        except (ValueError, KeyError):
+            sig_name = str(-rc)
+        return f"killed by {sig_name}"
+    if rc == 0:
+        return "exited normally"
+    return f"exited with code {rc}"
+
+
+def _read_stderr(source: subprocess.Popen | tempfile.SpooledTemporaryFile | object) -> str:
+    """Read stderr from a Popen pipe or a file object used as stderr."""
+    if isinstance(source, subprocess.Popen):
+        pipe = source.stderr
+        if pipe is None:
+            return ""
+        try:
+            return pipe.read().decode(errors="replace").strip()
+        except Exception:
+            return ""
+    # file-like (e.g. TemporaryFile used as pg_dump stderr)
+    try:
+        source.seek(0)
+        return source.read().decode(errors="replace").strip()
+    except Exception:
+        return ""
 
 
 def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.SshConfig | None = None, pg_dump_timeout: int = 3600, age_public_key: str | None = None) -> BackupResult:
@@ -146,34 +249,76 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
                         stderr=subprocess.PIPE,
                     )
                     pg_dump.stdout.close()
-                    age_stderr = age_proc.communicate(timeout=pg_dump_timeout)[1]
+
+                    stall = _monitor_procs(age_proc, tmp, label, pg_dump_timeout)
+                    if stall:
+                        pg_dump_state = _proc_status(pg_dump)
+                        age_state = _proc_status(age_proc)
+                        pg_stderr = _read_stderr(pg_stderr_file)
+                        age_stderr = _read_stderr(age_proc)
+                        _kill_procs(pg_dump, age_proc)
+                        tmp.unlink(missing_ok=True)
+
+                        size_str = f"{stall.last_size / (1024 ** 3):.1f} GB"
+                        if stall.reason == "timeout":
+                            msg = f"timed out after {pg_dump_timeout}s at {size_str}"
+                        else:
+                            msg = f"stalled at {size_str} — no data written for {STALL_TIMEOUT}s"
+                        msg += f" | pg_dump: {pg_dump_state}"
+                        if pg_stderr:
+                            msg += f" ({pg_stderr})"
+                        msg += f" | age: {age_state}"
+                        if age_stderr:
+                            msg += f" ({age_stderr})"
+
+                        log.error("%s: %s", label, msg)
+                        return BackupResult(uri, dbname, hostname, success=False, error=msg)
+
                     pg_dump.wait(timeout=60)
 
-                    pg_stderr_file.seek(0)
-                    pg_stderr = pg_stderr_file.read().decode(errors="replace").strip()
+                    pg_stderr = _read_stderr(pg_stderr_file)
+                    age_stderr = _read_stderr(age_proc)
 
                 if pg_dump.returncode != 0:
                     log.error("pg_dump failed for %s: %s", label, pg_stderr)
                     tmp.unlink(missing_ok=True)
                     return BackupResult(uri, dbname, hostname, success=False, error=pg_stderr)
                 if age_proc.returncode != 0:
-                    stderr = age_stderr.decode(errors="replace").strip()
-                    log.error("age encryption failed for %s: %s", label, stderr)
+                    log.error("age encryption failed for %s: %s", label, age_stderr)
                     tmp.unlink(missing_ok=True)
-                    return BackupResult(uri, dbname, hostname, success=False, error=f"age: {stderr}")
+                    return BackupResult(uri, dbname, hostname, success=False, error=f"age: {age_stderr}")
 
                 log.info("Encrypted with age")
             else:
                 with tmp.open("wb") as f:
-                    proc = subprocess.run(
+                    proc = subprocess.Popen(
                         ["pg_dump", "-Fc", dump_uri],
                         stdout=f,
                         stderr=subprocess.PIPE,
                         env=dump_env,
-                        timeout=pg_dump_timeout,
                     )
+
+                    stall = _monitor_procs(proc, tmp, label, pg_dump_timeout)
+                    if stall:
+                        pg_dump_state = _proc_status(proc)
+                        stderr = _read_stderr(proc)
+                        _kill_procs(proc)
+                        tmp.unlink(missing_ok=True)
+
+                        size_str = f"{stall.last_size / (1024 ** 3):.1f} GB"
+                        if stall.reason == "timeout":
+                            msg = f"timed out after {pg_dump_timeout}s at {size_str}"
+                        else:
+                            msg = f"stalled at {size_str} — no data written for {STALL_TIMEOUT}s"
+                        msg += f" | pg_dump: {pg_dump_state}"
+                        if stderr:
+                            msg += f" ({stderr})"
+
+                        log.error("%s: %s", label, msg)
+                        return BackupResult(uri, dbname, hostname, success=False, error=msg)
+
+                stderr = _read_stderr(proc)
                 if proc.returncode != 0:
-                    stderr = proc.stderr.decode(errors="replace").strip()
                     log.error("pg_dump failed for %s: %s", label, stderr)
                     tmp.unlink(missing_ok=True)
                     return BackupResult(uri, dbname, hostname, success=False, error=stderr)
