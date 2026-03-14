@@ -40,6 +40,11 @@ def parse_ssh_config() -> SshConfig | None:
     pkey = None
     ssh_key = os.environ.get("SSH_KEY", "").strip()
     if ssh_key:
+        # Restore newlines that may have been flattened to spaces
+        ssh_key = ssh_key.replace(" ", "\n")
+        for marker in ("BEGIN", "END"):
+            ssh_key = ssh_key.replace(f"-----{marker}\n", f"-----{marker} ")
+
         key_classes = [paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey]
         for cls in key_classes:
             try:
