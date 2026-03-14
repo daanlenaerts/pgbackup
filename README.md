@@ -48,12 +48,10 @@ Create a read-only role dedicated to backups:
 
 ```sql
 CREATE ROLE pgbackup WITH LOGIN PASSWORD 'a-strong-password';
-GRANT CONNECT ON DATABASE mydb TO pgbackup;
--- connect to mydb, then:
-GRANT USAGE ON SCHEMA public TO pgbackup;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO pgbackup;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO pgbackup;
+GRANT pg_read_all_data TO pgbackup;
 ```
+
+This grants read access to all tables, views, and sequences across every schema. No need to repeat grants per schema — new schemas and tables are covered automatically.
 
 Then use it in the connection string:
 
