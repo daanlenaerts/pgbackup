@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -114,11 +115,11 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
             dump_env = {**os.environ, "PGCONNECT_TIMEOUT": "30"}
 
             if age_public_key:
-                with tmp.open("wb") as f:
+                with tmp.open("wb") as f, tempfile.TemporaryFile() as pg_stderr_file:
                     pg_dump = subprocess.Popen(
                         ["pg_dump", "-Fc", tunneled_uri],
                         stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        stderr=pg_stderr_file,
                         env=dump_env,
                     )
                     age_proc = subprocess.Popen(
@@ -129,13 +130,15 @@ def backup_database(uri: str, backup_dir: Path, timestamp: str, ssh_config: ssh.
                     )
                     pg_dump.stdout.close()
                     age_stderr = age_proc.communicate(timeout=pg_dump_timeout)[1]
-                    pg_dump.wait()
+                    pg_dump.wait(timeout=60)
+
+                    pg_stderr_file.seek(0)
+                    pg_stderr = pg_stderr_file.read().decode(errors="replace").strip()
 
                 if pg_dump.returncode != 0:
-                    stderr = pg_dump.stderr.read().decode(errors="replace").strip()
-                    log.error("pg_dump failed for %s: %s", label, stderr)
+                    log.error("pg_dump failed for %s: %s", label, pg_stderr)
                     tmp.unlink(missing_ok=True)
-                    return BackupResult(uri, dbname, hostname, success=False, error=stderr)
+                    return BackupResult(uri, dbname, hostname, success=False, error=pg_stderr)
                 if age_proc.returncode != 0:
                     stderr = age_stderr.decode(errors="replace").strip()
                     log.error("age encryption failed for %s: %s", label, stderr)
