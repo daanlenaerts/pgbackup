@@ -9,8 +9,8 @@ RUN apt-get update && \
 COPY backup.py ssh.py telegram.py /app/
 WORKDIR /app
 
-# Pre-install script deps
-RUN uv run --script backup.py --help 2>/dev/null || true
+# UV sync
+RUN uv sync --no-dev --frozen
 
 ENV BACKUP_DIR=/backups
 VOLUME /backups
