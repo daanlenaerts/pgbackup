@@ -6,7 +6,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends postgresql-client && \
     rm -rf /var/lib/apt/lists/*
 
-COPY backup.py telegram.py /app/
+COPY backup.py ssh.py telegram.py /app/
 WORKDIR /app
 
 # Pre-install script deps
